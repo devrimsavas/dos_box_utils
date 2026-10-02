@@ -1,0 +1,23 @@
+# Virtual environments
+venv/
+env/
+.myenv/
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environment variables
+.env
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Tool output
+logs/
+diff_results.txt
+*.bin
