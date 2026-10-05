@@ -58,28 +58,23 @@ def bytes_needed(mode, height, stride):
     return min(MAX_READ, height * stride)
 
 
-def decode_vga256(data, width, height, stride, pan=0):
-    """
-    Chunky 256-color pixels, `stride` bytes per line, the picture starting `pan` pixels into each line.
-    Returns a (height, width) array of color indices.
-    """
+def decode_vga256(data, width, height, stride):
+    """Chunky 256-color pixels, `stride` bytes per line. Returns a (height, width) array of color indices."""
     data = np.frombuffer(data, dtype=np.uint8)
     lines = min(height, len(data) // stride)
     frame = np.zeros((height, width), dtype=np.uint8)
     if lines <= 0:
         return frame
-    rows = data[:lines * stride].reshape((lines, stride))[:, pan:]
-    cols = min(width, rows.shape[1])
+    rows = data[:lines * stride].reshape((lines, stride))
+    cols = min(width, stride)
     frame[:lines, :cols] = rows[:, :cols]
     return frame
 
 
-def decode_ega16(data, width, height, stride, pan=0):
+def decode_ega16(data, width, height, stride):
     """
     EGA planar 16-color pixels as DOSBox stores them: 4 interleaved plane bytes per address,
     `stride` addresses per line, 8 pixels per address (most significant bit = leftmost pixel).
-    `pan` skips that many pixels at the start of each line: smooth-scrolling games (Commander Keen)
-    start the picture in the middle of a byte.
     Returns a (height, width) array of color indices 0-15.
     """
     data = np.frombuffer(data, dtype=np.uint8)
@@ -92,7 +87,6 @@ def decode_ega16(data, width, height, stride, pan=0):
     pixels = np.zeros((lines, stride * 8), dtype=np.uint8)
     for p in range(PLANES):
         pixels |= np.unpackbits(planes[:, :, p], axis=1) << p
-    pixels = pixels[:, pan:]
     cols = min(width, pixels.shape[1])
     frame[:lines, :cols] = pixels[:, :cols]
     return frame
@@ -114,7 +108,7 @@ class DOSBoxVGAApp:
     def __init__(self, root):
         self.root = root
         self.root.title("DOSBox-X Live VGA Control Panel")
-        self.root.geometry("480x640")
+        self.root.geometry("480x620")
         self.root.resizable(False, False)
 
         self.is_running = False
@@ -124,7 +118,6 @@ class DOSBoxVGAApp:
         # Geometry shared with the stream thread (plain attributes, updated from the GUI)
         self.mode = MODE_VGA256
         self.geo_width, self.geo_height, self.geo_stride = MODE_DEFAULTS[MODE_VGA256]
-        self.geo_pan = 0
         self.aspect_43 = True
 
         # Load available palettes
@@ -175,15 +168,13 @@ class DOSBoxVGAApp:
         self.var_width = tk.IntVar(value=self.geo_width)
         self.var_height = tk.IntVar(value=self.geo_height)
         self.var_stride = tk.IntVar(value=self.geo_stride)
-        self.var_pan = tk.IntVar(value=0)
-        for label, var, low, high, step, w in (("Width", self.var_width, 8, 1024, 8, 5),
-                                               ("Height", self.var_height, 8, 768, 1, 5),
-                                               ("Stride", self.var_stride, 1, 2048, 1, 5),
-                                               ("Pan", self.var_pan, 0, 7, 1, 3)):
+        for label, var, low, high, step in (("Width", self.var_width, 8, 1024, 8),
+                                            ("Height", self.var_height, 8, 768, 1),
+                                            ("Stride", self.var_stride, 1, 2048, 1)):
             ttk.Label(f_size, text=label).pack(side="left", padx=(0, 2))
-            sb = ttk.Spinbox(f_size, textvariable=var, from_=low, to=high, increment=step, width=w,
+            sb = ttk.Spinbox(f_size, textvariable=var, from_=low, to=high, increment=step, width=6,
                              command=self.on_geometry_change)
-            sb.pack(side="left", padx=(0, 6))
+            sb.pack(side="left", padx=(0, 8))
             sb.bind("<Return>", lambda _e: self.on_geometry_change())
             sb.bind("<FocusOut>", lambda _e: self.on_geometry_change())
 
@@ -194,9 +185,8 @@ class DOSBoxVGAApp:
                         command=self.on_geometry_change).pack(side="left")
         ttk.Button(f_opts, text="Reset", width=7, command=self.reset_geometry).pack(side="right")
 
-        ttk.Label(frame_geo, text="Stride = bytes per line (VGA: 320, EGA: 40, Keen: 64).\n"
-                                  "Slanted image: fix the stride with [ and ].\n"
-                                  "Pan = pixel offset shown by the Screen Locator.",
+        ttk.Label(frame_geo, text="Stride = bytes per line as the game sees it (VGA: 320, EGA: 40).\n"
+                                  "A slanted image means the stride is wrong: use [ and ] to fix it.",
                   foreground="gray", justify="left").pack(anchor="w", padx=5, pady=(0, 4))
 
         # Palette selector dropdown
@@ -259,7 +249,7 @@ class DOSBoxVGAApp:
         lbl_text = (
             "W / S : +/- 10 lines\n"
             "D / A : +/- 1 line   |   X / Z : +/- 1 byte (fine shift)\n"
-            "[ / ] : stride -/+ 1   |   , / . : width -/+ 8   |   P : pan 0-7\n"
+            "[ / ] : stride -/+ 1   |   , / . : width -/+ 8\n"
             "+ / - : Frame delay (ms) | Q : Stop stream"
         )
         ttk.Label(frame_info, text=lbl_text, justify="center").pack(pady=4)
@@ -292,7 +282,6 @@ class DOSBoxVGAApp:
         self.var_width.set(width)
         self.var_height.set(height)
         self.var_stride.set(stride)
-        self.var_pan.set(0)
         self.on_geometry_change()
 
     def on_geometry_change(self):
@@ -301,18 +290,16 @@ class DOSBoxVGAApp:
             width = max(8, int(self.var_width.get()))
             height = max(1, int(self.var_height.get()))
             stride = max(1, int(self.var_stride.get()))
-            pan = min(7, max(0, int(self.var_pan.get())))
         except (tk.TclError, ValueError):
             return
         self.mode = self.var_mode.get()
-        self.geo_width, self.geo_height, self.geo_stride, self.geo_pan = width, height, stride, pan
+        self.geo_width, self.geo_height, self.geo_stride = width, height, stride
         self.aspect_43 = bool(self.var_aspect.get())
 
-    def set_geometry_from_stream(self, width, stride, pan):
+    def set_geometry_from_stream(self, width, stride):
         """Called on the GUI thread after a key press in the OpenCV window changed the geometry."""
         self.var_width.set(width)
         self.var_stride.set(stride)
-        self.var_pan.set(pan)
 
     # ----- Process selection -----
 
@@ -415,10 +402,10 @@ class DOSBoxVGAApp:
         """Decodes one frame with the current mode and geometry and scales it for display."""
         mode, width, height, stride = self.mode, self.geo_width, self.geo_height, self.geo_stride
         if mode == MODE_EGA16:
-            indices = decode_ega16(raw, width, height, stride, self.geo_pan)
+            indices = decode_ega16(raw, width, height, stride)
             img = self.active_ega_palette[indices & 0x0F]
         else:
-            indices = decode_vga256(raw, width, height, stride, self.geo_pan)
+            indices = decode_vga256(raw, width, height, stride)
             img = self.active_palette[indices]
 
         out_w = width * DISPLAY_SCALE
@@ -458,7 +445,7 @@ class DOSBoxVGAApp:
             if success:
                 scaled = self.render_frame(c_buffer.raw[:size])
                 info = (f"Addr: {hex(self.current_addr)}  {self.geo_width}x{self.geo_height}  "
-                        f"stride {self.geo_stride}  pan {self.geo_pan}")
+                        f"stride {self.geo_stride}")
                 cv2.putText(scaled, info, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                 cv2.imshow(window_name, scaled)
 
@@ -505,14 +492,11 @@ class DOSBoxVGAApp:
             elif key == ord(","):
                 self.geo_width = max(8, self.geo_width - 8)
                 geo_changed = True
-            elif key == ord("p"):
-                self.geo_pan = (self.geo_pan + 1) % 8                # 0..7, then back to 0
-                geo_changed = True
 
             if addr_changed:
                 self.root.after(0, self.update_address_entry, self.current_addr)
             if geo_changed:
-                self.root.after(0, self.set_geometry_from_stream, self.geo_width, self.geo_stride, self.geo_pan)
+                self.root.after(0, self.set_geometry_from_stream, self.geo_width, self.geo_stride)
 
         kernel32.CloseHandle(h_process)
         cv2.destroyAllWindows()

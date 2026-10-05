@@ -154,6 +154,26 @@ DOS_BOX_UTILS/
 ├── logs/                       Error output of each tool (created by the launcher)
 └── requirements.txt
 ```
+### Finding the screen in memory
+
+Some games do not draw straight to the usual video address: they scroll with hardware tricks,
+flip between several screen pages, or use a virtual screen wider than the visible one.
+The *Screen Locator* finds the picture anyway:
+
+1. Pause the game (DOSBox-X: Alt+Pause) and take a screenshot (Ctrl+F5), or capture the window.
+2. Load the screenshot and press **Search memory**.
+3. The tool picks detailed rows from the screenshot, uses the pattern of where neighbouring pixels
+   change color as a fingerprint (independent of the palette), and scans the DOSBox process for it,
+   decoded both as VGA 256-color and EGA 16-color planar memory.
+4. Each hit is checked by finding the line stride from a second row and comparing the whole frame.
+
+The result gives the address, mode, stride and pixel pan to enter in the VGA viewer.
+
+**Example: Commander Keen 6.** EGA 16 colors with a 512-pixel virtual screen (stride 64),
+the picture starting 2 pixels into the first byte (pan 2), and three screen pages 0xF000 apart
+that the game flips between. All of this was found automatically from one screenshot.
+
+![DOSBox Tools overview](screenshots/screen_locator.png)
 
 ## Notes
 
