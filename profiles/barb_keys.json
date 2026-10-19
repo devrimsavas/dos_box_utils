@@ -1,0 +1,74 @@
+{
+  "keys": [
+    {
+      "name": "left",
+      "mode": "BIOS key",
+      "address": "",
+      "idle": "",
+      "pressed": "3B"
+    },
+    {
+      "name": "up",
+      "mode": "BIOS key",
+      "address": "",
+      "idle": "",
+      "pressed": "3C"
+    },
+    {
+      "name": "down",
+      "mode": "BIOS key",
+      "address": "",
+      "idle": "",
+      "pressed": "3D"
+    },
+    {
+      "name": "right",
+      "mode": "BIOS key",
+      "address": "",
+      "idle": "",
+      "pressed": "3E"
+    },
+    {
+      "name": "stop",
+      "mode": "BIOS key",
+      "address": "",
+      "idle": "",
+      "pressed": "3F"
+    },
+    {
+      "name": "runleft",
+      "mode": "BIOS key",
+      "address": "",
+      "idle": "",
+      "pressed": "40"
+    },
+    {
+      "name": "runright",
+      "mode": "BIOS key",
+      "address": "",
+      "idle": "",
+      "pressed": "41"
+    },
+    {
+      "name": "hit",
+      "mode": "BIOS key",
+      "address": "",
+      "idle": "",
+      "pressed": "42"
+    },
+    {
+      "name": "jump back",
+      "mode": "BIOS key",
+      "address": "",
+      "idle": "",
+      "pressed": "43"
+    },
+    {
+      "name": "escape",
+      "mode": "BIOS key",
+      "address": "",
+      "idle": "",
+      "pressed": "44"
+    }
+  ]
+}

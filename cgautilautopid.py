@@ -6,6 +6,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import cv2
 import numpy as np
+import dosbox_session
 from PIL import Image, ImageTk
 
 try:
@@ -24,12 +25,20 @@ PROCESS_VM_READ = 0x0010
 
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
-# CGA mode 4 (320x200, 4 colors, 2 bits per pixel, 80 bytes per line)
+# CGA graphics modes. Both use 80 bytes per line in real CGA memory:
+#   mode 4: 320x200, 4 colors, 2 bits per pixel (BASIC: SCREEN 1)
+#   mode 6: 640x200, 2 colors, 1 bit per pixel  (BASIC: SCREEN 2)
 CGA_VRAM_OFFSET = "B800:0000"   # real CGA video memory = linear 0xB8000
-BYTES_PER_LINE = 80
+BYTES_PER_LINE = 80             # default stride
+CGA_BANK = 0x2000               # interlaced: odd lines start 8 KB after the even lines
+LINES = 200
+MAX_STRIDE = 1024
 LAYOUT_INTERLACED = "Interlaced (CGA video memory)"
 LAYOUT_LINEAR = "Linear (game back buffer)"
 LAYOUTS = [LAYOUT_INTERLACED, LAYOUT_LINEAR]
+MODE_CGA4 = "4 colors (320x200)"
+MODE_CGA2 = "2 colors (640x200)"
+MODES = [MODE_CGA4, MODE_CGA2]
 
 
 def find_dosbox_processes():
@@ -62,39 +71,50 @@ def parse_address_input(addr_str):
     return total
 
 
-def decode_cga_interlaced(data):
+def line_offsets(stride, interlaced):
+    """Byte offset of each of the 200 lines from the start of the screen."""
+    y = np.arange(LINES)
+    if interlaced:
+        return (y & 1) * CGA_BANK + (y >> 1) * stride
+    return y * stride
+
+
+def bytes_needed(stride, interlaced):
+    """How many bytes one frame spans in memory (80 bytes of pixels per line)."""
+    return int(line_offsets(stride, interlaced).max()) + BYTES_PER_LINE
+
+
+def decode_cga(data, mode=MODE_CGA4, stride=BYTES_PER_LINE, interlaced=True):
     """
-    Real CGA video memory: even lines start at 0x0000, odd lines at 0x2000.
-    Returns a 200x320 array of color indices (0-3).
+    Decodes 200 CGA lines of 80 bytes each, `stride` bytes apart.
+      interlaced: real CGA video memory, even lines from 0x0000, odd lines from 0x2000.
+      linear:     all lines one after another, as in many games' back buffers in normal RAM.
+    Returns color indices 0-3: a 200x320 array (4 colors) or a 200x640 array (2 colors, as 0 and 3).
     """
-    even_bank = data[0x0000:0x1F40].reshape((100, BYTES_PER_LINE))
-    odd_bank = data[0x2000:0x3F40].reshape((100, BYTES_PER_LINE))
-    frame = np.zeros((200, 320), dtype=np.uint8)
+    rows = data[line_offsets(stride, interlaced)[:, None] + np.arange(BYTES_PER_LINE)[None, :]]
+    if mode == MODE_CGA2:
+        return np.unpackbits(rows, axis=1) * 3  # 1 bit per pixel; shown with palette colors 0 and 3
+    frame = np.zeros((LINES, 320), dtype=np.uint8)
     for i in range(4):
-        shift = 6 - (i * 2)
-        frame[0::2, i::4] = (even_bank >> shift) & 0x03
-        frame[1::2, i::4] = (odd_bank >> shift) & 0x03
+        frame[:, i::4] = (rows >> (6 - i * 2)) & 0x03
     return frame
+
+
+def decode_cga_interlaced(data):
+    """Real CGA video memory in mode 4, 80 bytes per line. Returns a 200x320 array of color indices (0-3)."""
+    return decode_cga(data, MODE_CGA4, BYTES_PER_LINE, interlaced=True)
 
 
 def decode_cga_linear(data):
-    """
-    Same pixel format, but all 200 lines one after another (16000 bytes).
-    Many games draw into a buffer like this in normal RAM and copy it to CGA memory later.
-    """
-    lines = data[:200 * BYTES_PER_LINE].reshape((200, BYTES_PER_LINE))
-    frame = np.zeros((200, 320), dtype=np.uint8)
-    for i in range(4):
-        shift = 6 - (i * 2)
-        frame[:, i::4] = (lines >> shift) & 0x03
-    return frame
+    """Mode 4 lines one after another (16000 bytes), like a game's back buffer in normal RAM."""
+    return decode_cga(data, MODE_CGA4, BYTES_PER_LINE, interlaced=False)
 
 
 class CGALiveTunerApp:
     def __init__(self, root):
         self.root = root
         self.root.title("DOSBox-X CGA Live Tuner & Palette Editor")
-        self.root.geometry("1100x700")
+        self.root.geometry("1100x760")
 
         self.h_process = None
         self.base = 0
@@ -105,7 +125,8 @@ class CGALiveTunerApp:
         self.events = queue.Queue()
         self.worker = None
 
-        self.buf_size = 0x4000  # 16 KB
+        self.stride = BYTES_PER_LINE
+        self.buf_size = bytes_needed(MAX_STRIDE, interlaced=False)  # large enough for any stride
         self.c_buffer = (ctypes.c_char * self.buf_size)()
         self.bytes_read = ctypes.c_size_t()
 
@@ -140,6 +161,7 @@ class CGALiveTunerApp:
         pid_row.grid(row=0, column=1, padx=5, pady=2, sticky=tk.EW)
         self.combo_pid = ttk.Combobox(pid_row, width=18)
         self.combo_pid.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.combo_pid.bind("<<ComboboxSelected>>", lambda _e: self.load_saved_base(), add="+")
         ttk.Button(pid_row, text="Refresh", width=8, command=self.refresh_pid_list).pack(side=tk.LEFT, padx=(4, 0))
 
         ttk.Label(conn_group, text="Base (hex):").grid(row=1, column=0, sticky=tk.W)
@@ -166,8 +188,27 @@ class CGALiveTunerApp:
         layout_combo.grid(row=3, column=1, padx=5, pady=2, sticky=tk.EW)
         layout_combo.bind("<<ComboboxSelected>>", lambda _e: self.history.clear())
 
+        ttk.Label(conn_group, text="Mode:").grid(row=4, column=0, sticky=tk.W)
+        self.var_mode = tk.StringVar(value=MODE_CGA4)
+        mode_combo = ttk.Combobox(conn_group, textvariable=self.var_mode, values=MODES,
+                                  state="readonly", width=26)
+        mode_combo.grid(row=4, column=1, padx=5, pady=2, sticky=tk.EW)
+        mode_combo.bind("<<ComboboxSelected>>", lambda _e: self.history.clear())
+
+        ttk.Label(conn_group, text="Stride:").grid(row=5, column=0, sticky=tk.W)
+        stride_row = ttk.Frame(conn_group)
+        stride_row.grid(row=5, column=1, padx=5, pady=2, sticky=tk.EW)
+        self.var_stride = tk.IntVar(value=BYTES_PER_LINE)
+        stride_box = ttk.Spinbox(stride_row, textvariable=self.var_stride, from_=1, to=MAX_STRIDE, width=6,
+                                 command=self.on_stride_change)
+        stride_box.pack(side=tk.LEFT)
+        stride_box.bind("<Return>", lambda _e: self.on_stride_change())
+        stride_box.bind("<FocusOut>", lambda _e: self.on_stride_change())
+        ttk.Label(stride_row, text="bytes per line (80 = CGA, keys [ ])",
+                  foreground="gray").pack(side=tk.LEFT, padx=(6, 0))
+
         self.btn_connect = ttk.Button(conn_group, text="Connect", command=self.toggle_connection)
-        self.btn_connect.grid(row=4, column=0, columnspan=2, pady=5)
+        self.btn_connect.grid(row=6, column=0, columnspan=2, pady=5)
 
         # Navigation Group
         nav_group = ttk.LabelFrame(control_frame, text="Address Navigation (Keys: W/S, A/D, Z/X)", padding=5)
@@ -215,8 +256,9 @@ class CGALiveTunerApp:
         color_labels = ["Color 0 (Background)", "Color 1 (Cyan)", "Color 2 (Magenta)", "Color 3 (White)"]
 
         for idx, name in enumerate(color_labels):
+            # 2 x 2 grid, so all four colors fit on smaller screens
             box = ttk.LabelFrame(palette_group, text=name, padding=3)
-            box.pack(fill=tk.X, pady=2)
+            box.grid(row=idx // 2, column=idx % 2, padx=2, pady=2, sticky=tk.NSEW)
 
             preview = tk.Canvas(box, width=30, height=20, relief=tk.RIDGE, bd=1)
             preview.grid(row=0, column=0, rowspan=3, padx=5)
@@ -230,7 +272,7 @@ class CGALiveTunerApp:
                     to=255,
                     orient=tk.HORIZONTAL,
                     showvalue=False,
-                    length=120,
+                    length=110,
                     command=lambda val, col=idx, ch=c_idx: self.on_palette_slider_change(col, ch, val),
                 )
                 scale.set(self.palette_rgb[idx][c_idx])
@@ -270,6 +312,24 @@ class CGALiveTunerApp:
             self.adjust_addr(1)
         elif key == "z":
             self.adjust_addr(-1)
+        elif key == "]":
+            self.set_stride(self.stride + 1)
+        elif key == "[":
+            self.set_stride(self.stride - 1)
+
+    def on_stride_change(self):
+        try:
+            self.set_stride(int(self.var_stride.get()))
+        except (tk.TclError, ValueError):
+            pass  # half-typed value; keep the current stride
+
+    def set_stride(self, stride):
+        stride = max(1, min(MAX_STRIDE, stride))
+        if stride != self.stride:
+            self.history.clear()  # frames with different strides do not mix
+        self.stride = stride
+        if self.var_stride.get() != stride:
+            self.var_stride.set(stride)
 
     def on_palette_slider_change(self, color_idx, channel_idx, val):
         self.palette_rgb[color_idx][channel_idx] = int(val)
@@ -309,6 +369,26 @@ class CGALiveTunerApp:
         else:
             self.combo_pid.set("")
             self.lbl_status.config(text="Status: DOSBox is not running")
+        self.load_saved_base()
+
+    def load_saved_base(self):
+        """Fills in the Base saved by the Base Finder for the selected DOSBox process."""
+        try:
+            pid = self.get_selected_pid()
+        except ValueError:
+            return
+        base = dosbox_session.load_base(pid)
+        if base is not None:
+            self.base_entry.delete(0, tk.END)
+            self.base_entry.insert(0, f"0x{base:X}")
+            self.lbl_status.config(text=f"Status: Base 0x{base:X} loaded from the Base Finder")
+
+    def save_found_base(self, base):
+        """Shares a Base found by this tool with the other tools."""
+        try:
+            dosbox_session.save_base(self.get_selected_pid(), base)
+        except ValueError:
+            pass
 
     def get_selected_pid(self):
         """Accepts either a dropdown item ('12345 - dosbox-x.exe') or a plain typed number."""
@@ -333,6 +413,7 @@ class CGALiveTunerApp:
         self.addr_entry.delete(0, tk.END)
         self.addr_entry.insert(0, CGA_VRAM_OFFSET)
         self.var_layout.set(LAYOUT_INTERLACED)
+        self.set_stride(BYTES_PER_LINE)
         if self.running:
             self.current_target = self.base + parse_address_input(CGA_VRAM_OFFSET)
             self.history.clear()
@@ -376,6 +457,7 @@ class CGALiveTunerApp:
                 else:
                     self.base_entry.delete(0, tk.END)
                     self.base_entry.insert(0, f"0x{base:X}")
+                    self.save_found_base(base)
                     self.lbl_status.config(text=f"Status: Base found: 0x{base:X}")
         except queue.Empty:
             pass
@@ -414,14 +496,17 @@ class CGALiveTunerApp:
             self.btn_connect.config(text="Connect")
             self.lbl_status.config(text="Status: Disconnected | Addr: 0x0")
 
+    def frame_size(self):
+        """Bytes to read for one frame with the current layout and stride."""
+        return bytes_needed(self.stride, self.var_layout.get() != LAYOUT_LINEAR)
+
     def decode_frame(self, raw_bytes):
-        """Converts raw CGA mode 4 bytes into a 200x320 array of color indices (0-3), using the chosen layout."""
+        """Converts raw CGA bytes into color indices (0-3), using the chosen mode, layout and stride."""
         data = np.frombuffer(raw_bytes, dtype=np.uint8)
-        if len(data) < 0x4000:
-            return np.zeros((200, 320), dtype=np.uint8)
-        if self.var_layout.get() == LAYOUT_LINEAR:
-            return decode_cga_linear(data)
-        return decode_cga_interlaced(data)
+        interlaced = self.var_layout.get() != LAYOUT_LINEAR
+        if len(data) < bytes_needed(self.stride, interlaced):
+            return np.zeros((LINES, 640 if self.var_mode.get() == MODE_CGA2 else 320), dtype=np.uint8)
+        return decode_cga(data, self.var_mode.get(), self.stride, interlaced)
 
     def filter_flicker(self, frame):
         """
@@ -429,6 +514,8 @@ class CGALiveTunerApp:
         A sprite that is missing in a few reads stays visible because it wins the majority.
         On a tie, the most recent read wins.
         """
+        if self.history and self.history[-1].shape != frame.shape:
+            self.history.clear()  # the mode changed between reads
         self.history.append(frame)
         if len(self.history) == 1:
             return frame
@@ -449,17 +536,18 @@ class CGALiveTunerApp:
         if not self.running:
             return
 
+        size = self.frame_size()
         success = kernel32.ReadProcessMemory(
             self.h_process,
             ctypes.c_void_p(self.current_target),
             self.c_buffer,
-            self.buf_size,
+            size,
             ctypes.byref(self.bytes_read),
         )
 
         if success:
             self.last_valid_target = self.current_target
-            index_frame = self.decode_frame(self.c_buffer.raw)
+            index_frame = self.decode_frame(self.c_buffer.raw[:size])
             stable_frame = self.filter_flicker(index_frame)
             palette_arr = np.array(self.palette_rgb, dtype=np.uint8)
             rgb_frame = palette_arr[stable_frame]
@@ -474,7 +562,7 @@ class CGALiveTunerApp:
             self.canvas_screen.delete("all")
             self.canvas_screen.create_image(0, 0, anchor=tk.NW, image=self.tk_img)
 
-            self.lbl_status.config(text=f"Status: Streaming | {self.describe_target()}")
+            self.lbl_status.config(text=f"Status: Streaming | {self.describe_target()} | stride {self.stride}")
         else:
             self.current_target = self.last_valid_target
             self.lbl_status.config(text=f"Status: Memory Read Error! Reverted to {self.describe_target()}")

@@ -21,3 +21,6 @@ Thumbs.db
 logs/
 diff_results.txt
 *.bin
+
+#Session json 
+session.json 

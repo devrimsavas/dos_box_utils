@@ -11,7 +11,8 @@ How it works:
      change color. This does not depend on the palette, so the colors never need to be known.
   3. The whole DOSBox process is scanned for the same fingerprint, decoded both as 256-color
      chunky pixels (VGA 13h / Mode X) and as 16-color EGA planes (4 planes interleaved per
-     address, as DOSBox stores them).
+     address, as DOSBox stores them). CGA modes (4 colors 320x200, 2 colors 640x200) can be
+     selected as well: packed pixels, with even and odd lines in two banks 8 KB apart.
   4. For every hit the line stride is found from a second row, the full frame is decoded and
      compared with the screenshot. The match score is the share of pixels whose memory value
      maps consistently to the same screen color (checked in both directions).
@@ -43,7 +44,16 @@ EnumWindowsProc = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
 MODE_AUTO = "Auto (VGA 256 + EGA 16)"
 MODE_VGA = "VGA 256 colors (chunky)"
 MODE_EGA = "EGA 16 colors (planar)"
-MODES = [MODE_AUTO, MODE_VGA, MODE_EGA]
+MODE_CGA4 = "CGA 4 colors (320x200)"
+MODE_CGA2 = "CGA 2 colors (640x200)"
+MODES = [MODE_AUTO, MODE_VGA, MODE_EGA, MODE_CGA4, MODE_CGA2]
+
+# CGA: packed pixels, leftmost pixel in the top bits of a byte
+CGA_MODES = (MODE_CGA4, MODE_CGA2)
+CGA_PIXELS_PER_BYTE = {MODE_CGA4: 4, MODE_CGA2: 8}
+CGA_SIZE = {MODE_CGA4: (320, 200), MODE_CGA2: (640, 200)}
+CGA_BANK = 0x2000           # interlaced CGA: odd lines start 8 KB after the even lines
+CGA_MAX_STRIDE = 256        # widest line tried for linear CGA buffers, in bytes
 
 SEGMENT = 64                # pixels per fingerprint segment (a multiple of 8, so EGA segments start on an address)
 MIN_TRANSITIONS = 10        # a segment needs this many color changes...
@@ -214,6 +224,35 @@ def frame_from_pixels(pixels, width, height, line_px):
     return pixels[index]
 
 
+def cga_pixels(raw, mode):
+    """CGA packed pixels: 4 per byte (2 bits each) or 8 per byte (1 bit each), leftmost pixel in the top bits."""
+    data = np.frombuffer(raw, dtype=np.uint8)
+    if mode == MODE_CGA2:
+        return np.unpackbits(data)
+    return np.stack([(data >> 6) & 3, (data >> 4) & 3, (data >> 2) & 3, data & 3], axis=1).ravel()
+
+
+def cga_line_offsets(height, stride, interlaced):
+    """Byte offset of every line from the top-left byte of the screen."""
+    y = np.arange(height)
+    if interlaced:
+        return (y & 1) * CGA_BANK + (y >> 1) * stride
+    return y * stride
+
+
+def cga_frame(read, mode, origin, width, height, stride, interlaced):
+    """Decodes a CGA screen that starts at byte address `origin`. Returns a (height, width) array or None."""
+    row_bytes = width // CGA_PIXELS_PER_BYTE[mode]
+    offsets = cga_line_offsets(height, stride, interlaced)
+    size = int(offsets.max()) + row_bytes
+    raw = read(origin, size)
+    if not raw or len(raw) < size:
+        return None
+    data = np.frombuffer(raw, dtype=np.uint8)
+    rows = data[offsets[:, None] + np.arange(row_bytes)[None, :]]
+    return cga_pixels(rows.tobytes(), mode).reshape(height, width)
+
+
 def values_explain_screen(values, labels):
     """
     True if every memory value in the segment always shows the same screen color.
@@ -312,6 +351,9 @@ class Search:
         return self.verify(hits), None
 
     def find_in_chunk(self, raw, chunk_addr, step, mode, patterns, hits):
+        if mode in CGA_MODES:
+            self.find_in_chunk_cga(raw, chunk_addr, step, mode, patterns, hits)
+            return
         if mode == MODE_EGA:
             # Region and chunk addresses are page aligned, so plane groups start on a multiple of 4
             pixels = ega_pixels(raw, len(raw) // PLANES * 8)
@@ -337,6 +379,9 @@ class Search:
         for pixel, mode, y0, x0 in hits:
             if self.stop.is_set():
                 break
+            if mode in CGA_MODES:
+                self.verify_cga(pixel, mode, y0, x0, results)
+                continue
             y1 = partner_row(self.labels, y0, x0)
             if y1 is None:
                 continue
@@ -373,6 +418,71 @@ class Search:
                                     "score": score, "frame": frame}
 
         return sorted(results.values(), key=lambda r: -r["score"])
+
+    # ----- CGA -----
+
+    def find_in_chunk_cga(self, raw, chunk_addr, step, mode, patterns, hits):
+        """Like find_in_chunk, for packed CGA pixels. Pixel index = byte address * pixels per byte."""
+        ppb = CGA_PIXELS_PER_BYTE[mode]
+        pixels = cga_pixels(raw, mode)
+        first_pixel, limit = chunk_addr * ppb, step * ppb
+        stream = transitions(pixels).tobytes()
+
+        for y0, x0, pattern, seg_labels in patterns:
+            found = 0
+            start = stream.find(pattern)
+            while start != -1 and found < MAX_HITS_PER_SEGMENT:
+                # x0 is a multiple of 8, so on a real CGA screen the segment starts on a byte
+                if (start < limit and start % ppb == 0
+                        and values_explain_screen(pixels[start:start + SEGMENT], seg_labels)):
+                    hits.append((first_pixel + start, mode, y0, x0))
+                    found += 1
+                start = stream.find(pattern, start + 1)
+
+    def verify_cga(self, pixel, mode, y0, x0, results):
+        """Tries the hit as an interlaced CGA screen (real video memory) and as a linear buffer."""
+        ppb = CGA_PIXELS_PER_BYTE[mode]
+        addr = pixel // ppb                     # byte holding screen pixel (x0, y0)
+        xb = x0 // ppb
+        row_bytes = self.width // ppb
+
+        # Interlaced, as in real CGA memory: 80 bytes per line, odd lines in the second bank
+        origin = addr - (y0 & 1) * CGA_BANK - (y0 >> 1) * row_bytes - xb
+        self.score_cga(origin, mode, row_bytes, True, results)
+
+        # Linear (a game's back buffer): find the line width from a second row
+        y1 = partner_row(self.labels, y0, x0)
+        if y1 is None:
+            return
+        d = y1 - y0
+        want = transitions(self.labels[y1, x0:x0 + SEGMENT])
+        seg_bytes = SEGMENT // ppb
+        near, far = addr + d * row_bytes, addr + d * CGA_MAX_STRIDE
+        first = min(near, far)
+        block = self.read(first, abs(far - near) + seg_bytes)
+        if not block:
+            return
+        for stride in range(row_bytes, CGA_MAX_STRIDE + 1):
+            at = addr + d * stride - first
+            seg = block[at:at + seg_bytes]
+            if len(seg) < seg_bytes or not np.array_equal(transitions(cga_pixels(seg, mode)), want):
+                continue
+            self.score_cga(addr - y0 * stride - xb, mode, stride, False, results)
+
+    def score_cga(self, origin, mode, stride, interlaced, results):
+        key = (origin, mode, stride, interlaced)
+        if origin < 0 or key in results:
+            return
+        frame = cga_frame(self.read, mode, origin, self.width, self.height, stride, interlaced)
+        if frame is None:
+            return
+        score = match_score(frame, self.labels)
+        self.best_score = max(self.best_score, score)
+        if score >= GOOD_SCORE:
+            layout = "interlaced" if interlaced else "linear"
+            results[key] = {"addr": origin, "pan": 0, "mode": mode, "stride": stride, "score": score,
+                            "frame": frame, "layout": layout, "rgb": self.rgb,
+                            "mode_text": f"{mode}, {layout}"}
 
 
 # =====================================================================
@@ -593,7 +703,15 @@ class ScreenLocatorApp:
         self.btn_stop.config(state=tk.NORMAL)
         self.progress["value"] = 0
 
-        search = Search(self.h_process, self.labels, self.screen_rgb, modes, self.events.put, self.stop_event)
+        labels, rgb = self.labels, self.screen_rgb
+        if mode in CGA_MODES:
+            # CGA has a fixed resolution; DOSBox screenshots of CGA modes are often doubled (640x400)
+            width, height = CGA_SIZE[mode]
+            if rgb.shape[:2] != (height, width):
+                rgb = downscale(rgb, width, height)
+                labels = color_labels(rgb)
+
+        search = Search(self.h_process, labels, rgb, modes, self.events.put, self.stop_event)
 
         def work():
             try:
@@ -630,7 +748,8 @@ class ScreenLocatorApp:
         self.results = results
         for i, r in enumerate(results):
             self.tree.insert("", tk.END, iid=str(i), values=(
-                f"0x{r['addr']:X}", r["mode"], r["stride"], r["pan"], f"{r['score'] * 100:.1f}%"))
+                f"0x{r['addr']:X}", r.get("mode_text", r["mode"]), r["stride"], r["pan"],
+                f"{r['score'] * 100:.1f}%"))
         if error:
             self.set_status(error, "red")
         elif not results:
@@ -639,7 +758,8 @@ class ScreenLocatorApp:
                             "Try a DOSBox-X screenshot.", "orange")
         else:
             best = results[0]
-            self.set_status(f"Found {len(results)} match(es). Best: 0x{best['addr']:X}, {best['mode']}, "
+            self.set_status(f"Found {len(results)} match(es). Best: 0x{best['addr']:X}, "
+                            f"{best.get('mode_text', best['mode'])}, "
                             f"stride {best['stride']}", "green")
             self.tree.selection_set("0")
 
@@ -653,7 +773,7 @@ class ScreenLocatorApp:
         r = self.selected()
         if r is None or self.screen_rgb is None:
             return
-        self.show_image(self.canvas_memory, preview_colors(r["frame"], self.screen_rgb), slot=1)
+        self.show_image(self.canvas_memory, preview_colors(r["frame"], r.get("rgb", self.screen_rgb)), slot=1)
 
     def show_image(self, canvas, rgb, slot):
         w, h = int(canvas["width"]), int(canvas["height"])
@@ -671,6 +791,10 @@ class ScreenLocatorApp:
             return
         self.root.clipboard_clear()
         self.root.clipboard_append(f"0x{r['addr']:X}")
+        if r["mode"] in CGA_MODES:
+            self.set_status(f"Copied 0x{r['addr']:X}. In the CGA viewer use Base 0, this address as Offset and "
+                            f"layout {r['layout'].capitalize()}.", "green")
+            return
         mode = "EGA 16 colors (planar)" if r["mode"] == MODE_EGA else "VGA 256 colors (13h / Mode X)"
         pan = f" (the picture starts {r['pan']} pixels into the first byte)" if r["pan"] else ""
         self.set_status(f"Copied 0x{r['addr']:X}. In the VGA viewer use Mode '{mode}', stride {r['stride']}{pan}.",

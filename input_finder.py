@@ -24,6 +24,7 @@ from tkinter import ttk
 import numpy as np
 
 import base_finder as bf
+import dosbox_session
 
 DOS_MEMORY_SIZE = 0x110000        # conventional + upper memory + HMA
 VIDEO_MEMORY = (0xA0000, 0xBFFFF)
@@ -201,6 +202,7 @@ class InputFinderApp:
         ttk.Label(conn, text="PID:").pack(side=tk.LEFT)
         self.combo_pid = ttk.Combobox(conn, width=24)
         self.combo_pid.pack(side=tk.LEFT, padx=4)
+        self.combo_pid.bind("<<ComboboxSelected>>", lambda _e: self.load_saved_base(), add="+")
         ttk.Button(conn, text="Refresh", width=8, command=self.refresh_pid_list).pack(side=tk.LEFT)
         ttk.Label(conn, text="Base (hex):").pack(side=tk.LEFT, padx=(14, 0))
         self.var_base = tk.StringVar()
@@ -275,6 +277,25 @@ class InputFinderApp:
         if not items:
             self.set_status("psutil not installed, enter PID manually" if bf.psutil is None
                             else "DOSBox is not running", "red")
+        self.load_saved_base()
+
+    def load_saved_base(self):
+        """Fills in the Base saved by the Base Finder for the selected DOSBox process."""
+        try:
+            pid = self.get_selected_pid()
+        except ValueError:
+            return
+        base = dosbox_session.load_base(pid)
+        if base is not None:
+            self.var_base.set(f"0x{base:X}")
+            self.set_status(f"Base 0x{base:X} loaded from the Base Finder (PID {pid})", "green")
+
+    def save_found_base(self, base):
+        """Shares a Base found by this tool with the other tools."""
+        try:
+            dosbox_session.save_base(self.get_selected_pid(), base)
+        except ValueError:
+            pass
 
     def get_selected_pid(self):
         return int(self.combo_pid.get().strip().split(" - ")[0].strip())
@@ -319,6 +340,7 @@ class InputFinderApp:
                         self.set_status(f"Base not found: {error}", "red")
                     else:
                         self.var_base.set(f"0x{base:X}")
+                        self.save_found_base(base)
                         self.set_status(f"Base found: 0x{base:X}", "green")
                         if then:
                             then()

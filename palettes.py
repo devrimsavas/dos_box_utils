@@ -1,8 +1,12 @@
 import os
+import sys
+
 import numpy as np
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
+
+LOAD_ERRORS = []  # files that could not be loaded, filled by get_available_palettes()
 
 
 def get_default_vga_palette():
@@ -90,23 +94,82 @@ def get_prince_palace_palette():
     return palette
 
 
+def parse_palette_file(data):
+    """
+    Reads a palette file and returns a list of (r, g, b) tuples with 8-bit values.
+    Supported formats (detected automatically):
+      * JASC-PAL (Paint Shop Pro, text)
+      * RIFF PAL (Microsoft, binary)
+      * GIMP palette (.gpl text, also accepted with a .pal name)
+      * Raw RGB triplets, as dumped from a game or DOSBox: 6-bit VGA DAC values (0-63)
+        or 8-bit values (0-255), up to 256 colors
+    Raises ValueError if the file is not a palette.
+    """
+    if data.startswith(b"JASC-PAL"):
+        lines = data.decode("ascii", "replace").split()
+        count = int(lines[2])
+        values = [int(v) for v in lines[3:3 + count * 3]]
+        return [tuple(values[i:i + 3]) for i in range(0, len(values) - 2, 3)]
+
+    if data.startswith(b"RIFF") and data[8:12] == b"PAL ":
+        pos = data.find(b"data", 12)
+        if pos < 0:
+            raise ValueError("RIFF palette without a data chunk")
+        count = int.from_bytes(data[pos + 10:pos + 12], "little")
+        entries = data[pos + 12:pos + 12 + count * 4]
+        return [tuple(entries[i:i + 3]) for i in range(0, len(entries) - 3, 4)]
+
+    if data.startswith(b"GIMP Palette"):
+        colors = []
+        for line in data.decode("utf-8", "replace").splitlines()[1:]:
+            parts = line.split()
+            if len(parts) >= 3 and all(p.isdigit() for p in parts[:3]):
+                colors.append(tuple(int(p) for p in parts[:3]))
+        return colors
+
+    # Raw RGB triplets, possibly with a game-specific header or trailer
+    if len(data) <= 768:
+        if len(data) < 3 or len(data) % 3 != 0:
+            raise ValueError(f"unknown format ({len(data)} bytes)")
+        block = data
+    else:
+        block = find_palette_block(data)
+    raw = np.frombuffer(block, dtype=np.uint8).reshape(-1, 3)
+    if raw.max() <= 63:
+        raw = raw.astype(np.uint16) * 255 // 63  # 6-bit VGA DAC values -> 8-bit
+    return [tuple(int(v) for v in rgb) for rgb in raw]
+
+
+def find_palette_block(data, size=768):
+    """
+    Finds the 256-color block in a file that has extra bytes around it, like game palettes
+    with their own header (782 bytes = 14-byte header + 768). VGA DAC values are 6-bit, so the
+    block where every byte is 0-63 is the palette. A header at the start is the most common case,
+    so the block at the end is tried first, then the one at the start, then everything in between.
+    """
+    last = len(data) - size
+    for offset in [last, 0] + list(range(1, last)):
+        block = data[offset:offset + size]
+        if max(block) <= 63:
+            return block
+    return data[last:]  # no 6-bit block: assume 8-bit values after a header
+
+
 def load_raw_palette_file(filepath):
-    # Reads 48 or 768 byte raw VGA DAC files (6-bit RGB)
+    """Loads a palette file (any supported format) as a 256-color BGR array."""
     with open(filepath, "rb") as f:
-        data = f.read()
+        colors = parse_palette_file(f.read())[:256]
+    if not colors:
+        raise ValueError("no colors in file")
 
     palette = np.zeros((256, 3), dtype=np.float32)
-    count = len(data) // 3
+    for i, (r, g, b) in enumerate(colors):
+        palette[i] = [min(b, 255), min(g, 255), min(r, 255)]
 
-    for i in range(count):
-        # Scale 6-bit DAC values (0..63) to 8-bit range (0..255)
-        r = (data[i * 3 + 0] & 0x3F) << 2
-        g = (data[i * 3 + 1] & 0x3F) << 2
-        b = (data[i * 3 + 2] & 0x3F) << 2
-        palette[i] = [b, g, r]
-
+    # Fewer than 256 colors (e.g. a 16-color EGA palette): repeat them
+    count = len(colors)
     for i in range(count, 256):
-        palette[i] = palette[i % max(1, count)]
+        palette[i] = palette[i % count]
 
     return palette
 
@@ -119,14 +182,17 @@ def get_available_palettes():
         "Prince of Persia - Palace": get_prince_palace_palette(),
     }
 
-    # Discover and add any raw .pal files located in the data directory
+    # Discover and add palette files located in the data directory
+    LOAD_ERRORS.clear()
     if os.path.exists(DATA_DIR):
-        for fname in os.listdir(DATA_DIR):
-            if fname.lower().endswith(".pal"):
+        for fname in sorted(os.listdir(DATA_DIR), key=str.lower):
+            if fname.lower().endswith((".pal", ".gpl")):
                 fpath = os.path.join(DATA_DIR, fname)
                 try:
                     registry[f"File: {fname}"] = load_raw_palette_file(fpath)
-                except Exception:
-                    pass
+                except Exception as e:
+                    # Report instead of hiding: the launcher writes this to logs/<tool>.log
+                    LOAD_ERRORS.append(f"{fname}: {e}")
+                    print(f"Palette skipped: {fname}: {e}", file=sys.stderr)
 
     return registry

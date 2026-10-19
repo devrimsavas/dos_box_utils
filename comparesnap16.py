@@ -23,6 +23,7 @@ from tkinter import filedialog, messagebox, ttk
 import numpy as np
 
 import base_finder as bf
+import dosbox_session
 
 DEFAULT_SNAP1 = "c:/dosbox-x/snap1.bin"
 DEFAULT_SNAP2 = "c:/dosbox-x/snap2.bin"
@@ -328,6 +329,7 @@ class MemoryDiffApp:
         ttk.Label(row1, text="PID:").pack(side=tk.LEFT)
         self.combo_pid = ttk.Combobox(row1, width=24)
         self.combo_pid.pack(side=tk.LEFT, padx=4)
+        self.combo_pid.bind("<<ComboboxSelected>>", lambda _e: self.load_saved_base(), add="+")
         ttk.Button(row1, text="Refresh", width=8, command=self.refresh_pid_list).pack(side=tk.LEFT)
 
         ttk.Label(row1, text="Base (hex):").pack(side=tk.LEFT, padx=(16, 0))
@@ -485,6 +487,25 @@ class MemoryDiffApp:
                 self.set_status("psutil not installed, enter PID manually")
             else:
                 self.set_status("DOSBox is not running")
+        self.load_saved_base()
+
+    def load_saved_base(self):
+        """Fills in the Base saved by the Base Finder for the selected DOSBox process."""
+        try:
+            pid = self.get_selected_pid()
+        except ValueError:
+            return
+        base = dosbox_session.load_base(pid)
+        if base is not None:
+            self.var_base.set(f"0x{base:X}")
+            self.set_status(f"Base 0x{base:X} loaded from the Base Finder (PID {pid})")
+
+    def save_found_base(self, base):
+        """Shares a Base found by this tool with the other tools."""
+        try:
+            dosbox_session.save_base(self.get_selected_pid(), base)
+        except ValueError:
+            pass
 
     def get_selected_pid(self):
         return int(self.combo_pid.get().strip().split(" - ")[0].strip())
@@ -585,6 +606,7 @@ class MemoryDiffApp:
                         self.set_status(f"Base not found: {error}")
                     else:
                         self.var_base.set(f"0x{base:X}")
+                        self.save_found_base(base)
                         self.set_status(f"Base found: 0x{base:X}")
                         if then_capture:
                             self.capture(then_capture)

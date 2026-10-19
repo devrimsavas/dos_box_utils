@@ -7,6 +7,8 @@ from tkinter import ttk, messagebox
 import cv2
 import numpy as np
 
+import dosbox_session
+
 from palettes import get_available_palettes
 
 try:
@@ -149,6 +151,7 @@ class DOSBoxVGAApp:
         self.btn_refresh_pid.pack(side="right", padx=(4, 0))
         self.combo_pid = ttk.Combobox(frame_pid)
         self.combo_pid.pack(side="right", expand=True, fill="x")
+        self.combo_pid.bind("<<ComboboxSelected>>", lambda _e: self.load_saved_base())
 
         # Offset / target address input field
         frame_addr = ttk.Frame(self.root)
@@ -338,6 +341,22 @@ class DOSBoxVGAApp:
         else:
             self.combo_pid.set("")
             self.lbl_status.config(text="Status: DOSBox is not running", foreground="red")
+            return
+        self.load_saved_base()
+
+    def load_saved_base(self):
+        """Puts the Base saved by the Base Finder into the address, unless an address was already entered."""
+        try:
+            pid = self.get_selected_pid()
+        except ValueError:
+            return
+        base = dosbox_session.load_base(pid)
+        current = self.entry_addr.get().replace(" ", "").lower()
+        if base is None or current not in ("", "0x0+0xa0000", "0+a0000"):
+            return
+        self.entry_addr.delete(0, tk.END)
+        self.entry_addr.insert(0, f"0x{base:X} + 0xA0000")
+        self.lbl_status.config(text=f"Status: Base 0x{base:X} loaded from the Base Finder", foreground="green")
 
     def get_selected_pid(self):
         """Accepts either a dropdown item ('12345 - dosbox-x.exe') or a plain typed number."""

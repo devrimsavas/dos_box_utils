@@ -5,6 +5,8 @@ import time
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+import dosbox_session
+
 try:
     import psutil
 except ImportError:
@@ -33,12 +35,24 @@ def find_dosbox_processes():
     return found
 
 
-def parse_address_input(addr_str):
-    addr_str = addr_str.strip().replace(" ", "")
+def parse_address_input(addr_str, base=None):
+    """
+    Adds up hex parts separated by '+'. A part can be segment:offset ('1226:27D4'),
+    or the word 'base' for the Base saved by the Base Finder ('base + 1226:27D4').
+    """
     total = 0
-    parts = addr_str.split("+")
-    for part in parts:
-        total += int(part, 16)
+    for part in addr_str.strip().replace(" ", "").split("+"):
+        if not part:
+            continue
+        if part.lower() == "base":
+            if base is None:
+                raise ValueError("no saved Base, run the Base Finder first")
+            total += base
+        elif ":" in part:
+            seg, off = part.split(":", 1)
+            total += int(seg, 16) * 16 + int(off, 16)
+        else:
+            total += int(part, 16)
     return total
 
 
@@ -71,7 +85,7 @@ class CheatRow:
         if not addr_str or not byte_str:
             return None, None
         
-        target_addr = parse_address_input(addr_str)
+        target_addr = parse_address_input(addr_str, self.app.base)
         byte_data = bytes.fromhex(byte_str.replace(" ", ""))
         return target_addr, byte_data
 
@@ -90,8 +104,8 @@ class CheatRow:
                 len(byte_data),
                 ctypes.byref(bytes_written),
             )
-        except Exception:
-            pass
+        except Exception as e:
+            self.app.lbl_status.config(text=f"Row {self.row_num}: {e}", foreground="red")
 
     def toggle_freeze(self):
         self.is_frozen = not self.is_frozen
@@ -106,6 +120,7 @@ class DOSBoxTrainerApp:
         self.root.resizable(False, False)
 
         self.h_process = None
+        self.base = None  # Base saved by the Base Finder, used for 'base' in addresses
         self.running = False
         self.freeze_thread = None
 
@@ -196,7 +211,12 @@ class DOSBoxTrainerApp:
 
             self.running = True
             self.btn_conn.config(text="Detach")
-            self.lbl_status.config(text=f"Attached ({pid})", foreground="green")
+            self.base = dosbox_session.load_base(pid)
+            if self.base is not None:
+                self.lbl_status.config(text=f"Attached ({pid}), Base 0x{self.base:X}: 'base + offset' works",
+                                       foreground="green")
+            else:
+                self.lbl_status.config(text=f"Attached ({pid})", foreground="green")
 
             self.freeze_thread = threading.Thread(target=self.freeze_loop, daemon=True)
             self.freeze_thread.start()

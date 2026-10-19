@@ -12,6 +12,8 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk
 
+import dosbox_session
+
 try:
     import psutil
 except ImportError:
@@ -154,6 +156,7 @@ class LiveHexViewerApp:
         ttk.Label(conn, text="PID:").pack(side=tk.LEFT)
         self.combo_pid = ttk.Combobox(conn, width=24)
         self.combo_pid.pack(side=tk.LEFT, padx=4)
+        self.combo_pid.bind("<<ComboboxSelected>>", lambda _e: self.load_saved_base())
         ttk.Button(conn, text="Refresh", width=8, command=self.refresh_pid_list).pack(side=tk.LEFT, padx=2)
         self.btn_attach = ttk.Button(conn, text="Attach", width=10, command=self.toggle_attach)
         self.btn_attach.pack(side=tk.LEFT, padx=4)
@@ -260,6 +263,19 @@ class LiveHexViewerApp:
         else:
             self.combo_pid.set("")
             self.set_status("DOSBox is not running", "red")
+            return
+        self.load_saved_base()
+
+    def load_saved_base(self):
+        """Fills in the Base saved by the Base Finder for the selected DOSBox process."""
+        try:
+            pid = self.get_selected_pid()
+        except ValueError:
+            return
+        base = dosbox_session.load_base(pid)
+        if base is not None:
+            self.var_base.set(f"0x{base:X}")
+            self.set_status(f"Base 0x{base:X} loaded from the Base Finder (PID {pid})", "green")
 
     def get_selected_pid(self):
         """Accepts either a dropdown item ('12345 - dosbox-x.exe') or a plain typed number."""

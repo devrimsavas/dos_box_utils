@@ -24,6 +24,8 @@ import tkinter as tk
 from collections import Counter
 from tkinter import ttk
 
+import dosbox_session
+
 try:
     import psutil
 except ImportError:
@@ -339,6 +341,7 @@ class BaseFinderApp:
         self.root.minsize(720, 580)
 
         self.h_process = None
+        self.pid = None
         self.worker = None
         self.stop_event = threading.Event()
         self.events = queue.Queue()
@@ -488,6 +491,7 @@ class BaseFinderApp:
         if not self.h_process:
             self.set_status(f"Could not open PID {pid} (error {ctypes.get_last_error()})", "red")
             return False
+        self.pid = pid
         return True
 
     # ----- Search -----
@@ -613,7 +617,7 @@ class BaseFinderApp:
 
         if kind == "auto_done":
             if len(verified) == 1:
-                self.set_status(prefix + f"Base found: 0x{verified[0]:X}  (double-click to copy)", "green")
+                self.share_base(verified[0], prefix)
             elif verified:
                 self.set_status(prefix + f"{len(verified)} candidates found. Use a text search to pick the right one.",
                                 "orange")
@@ -624,7 +628,7 @@ class BaseFinderApp:
         elif len(results) >= MAX_HITS:
             self.set_status(prefix + f"Stopped at {MAX_HITS} hits. Use a longer pattern.", "orange")
         elif len(verified) == 1:
-            self.set_status(prefix + f"Base found: 0x{verified[0]:X}  (double-click to copy)", "green")
+            self.share_base(verified[0], prefix)
         elif len(verified) > 1:
             self.set_status(prefix + f"{len(verified)} different bases. Use a longer pattern to narrow it down.",
                             "orange")
@@ -679,11 +683,22 @@ class BaseFinderApp:
             self.set_status("No Base for this row.", "orange")
             return
         self.copy_text(f"0x{r['base']:X}", "Base")
+        if r["ok"] and self.pid is not None and dosbox_session.save_base(self.pid, r["base"]):
+            self.set_status(f"Copied Base: 0x{r['base']:X}  (saved, the other tools will use it)", "green")
 
     def copy_address(self):
         r = self.selected_result()
         if r:
             self.copy_text(f"0x{r['address']:X}", "address")
+
+    def share_base(self, base, prefix=""):
+        """Saves the Base so the other tools pick it up automatically."""
+        text = prefix + f"Base found: 0x{base:X}"
+        if self.pid is not None and dosbox_session.save_base(self.pid, base):
+            text += "  (saved, the other tools will use it)"
+        else:
+            text += "  (double-click to copy)"
+        self.set_status(text, "green")
 
     # ----- Misc -----
 
