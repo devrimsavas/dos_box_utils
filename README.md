@@ -31,10 +31,9 @@ venv\Scripts\activate
 pip install -r requirements.txt
 
 # 4. Start the launcher
-python launcher_last_last1.py
+python launcher.py
 ```
 
-it is final (so far :D) launcher
 Next time, only steps 2 (activate) and 4 are needed.
 
 > If PowerShell refuses to run `activate`, allow local scripts once:
@@ -149,6 +148,7 @@ DOS_BOX_UTILS/
 ├── key_injector.py             Key Injector
 ├── profiles/                   Key Injector profiles (one JSON per game)
 ├── livepreview.py              Live Preview
+├── screen_locator.py           Screen Locator
 ├── palettes.py                 VGA palettes (used by the VGA viewer)
 ├── foundresults/               Saved findings
 ├── logs/                       Error output of each tool (created by the launcher)
